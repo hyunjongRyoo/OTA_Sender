@@ -2,7 +2,9 @@ import queue
 import select
 import socket
 import threading
+import time
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -14,17 +16,17 @@ from ota_send import (
     send_ota,
 )
 
-
 class OtaSenderApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("TCP OTA Sender")
-        self.root.geometry("980x760")
-        self.root.minsize(820, 650)
+        self.root.title("OTA Firmware Update Manager")
+        self.root.geometry("1080x820")
+        self.root.minsize(920, 720)
+        self.root.configure(bg="#eef2f6")
 
         self.events = queue.Queue()
+        self.clients = {}
         self.server_socket = None
-        self.client_socket = None
         self.accept_worker = None
         self.ota_worker = None
         self.server_running = False
@@ -35,20 +37,51 @@ class OtaSenderApp:
         self.bin_var = tk.StringVar()
         self.progress_var = tk.DoubleVar(value=0.0)
         self.server_status_var = tk.StringVar(value="Stopped")
-        self.connection_var = tk.StringVar(value="Disconnected")
+        self.connection_var = tk.StringVar(value="Connected devices: 0")
         self.status_var = tk.StringVar(value="Ready")
 
+        self.setup_styles()
         self.build_ui(addresses)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(100, self.process_events)
 
+    def setup_styles(self):
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure("Card.TLabelframe", background="#ffffff", borderwidth=1,
+                        relief="solid")
+        style.configure("Card.TLabelframe.Label", background="#eef2f6",
+                        foreground="#334155", font=("Segoe UI Semibold", 10))
+        style.configure("Header.TLabel", background="#18324a", foreground="#ffffff",
+                        font=("Segoe UI Semibold", 18))
+        style.configure("SubHeader.TLabel", background="#18324a", foreground="#cbd5e1")
+        style.configure("Primary.TButton", background="#1677c8", foreground="#ffffff",
+                        padding=(16, 8), font=("Segoe UI Semibold", 9))
+        style.map("Primary.TButton", background=[("active", "#0f65ad"),
+                                                  ("disabled", "#94a3b8")])
+        style.configure("Secondary.TButton", padding=(13, 7))
+        style.configure("Treeview", rowheight=30, background="#ffffff",
+                        fieldbackground="#ffffff", foreground="#1e293b")
+        style.configure("Treeview.Heading", background="#dce6ef", foreground="#26384a",
+                        padding=(8, 8), font=("Segoe UI Semibold", 9), relief="flat")
+        style.configure("Status.Horizontal.TProgressbar", troughcolor="#dbe4ec",
+                        background="#1d9b67")
+
     def build_ui(self, addresses):
         root = self.root
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(4, weight=1)
+        root.rowconfigure(6, weight=1)
 
-        server_frame = ttk.LabelFrame(root, text="TCP OTA Server", padding=12)
-        server_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+        header = tk.Frame(root, bg="#18324a", padx=18, pady=12)
+        header.grid(row=0, column=0, sticky="ew", padx=20, pady=(16, 12))
+        ttk.Label(header, text="OTA Firmware Update Manager",
+                  style="Header.TLabel").pack(anchor="w")
+        ttk.Label(header, text="Multi-device firmware deployment and status monitor",
+                  style="SubHeader.TLabel").pack(anchor="w", pady=(2, 0))
+
+        server_frame = ttk.LabelFrame(root, text="1. TCP OTA SERVER", padding=14,
+                                      style="Card.TLabelframe")
+        server_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 10))
         server_frame.columnconfigure(1, weight=1)
 
         ttk.Label(server_frame, text="Local PC IP").grid(row=0, column=0, sticky="w")
@@ -61,7 +94,8 @@ class OtaSenderApp:
         )
         self.host_combo.grid(row=0, column=1, sticky="ew", padx=(8, 8))
         self.refresh_button = ttk.Button(
-            server_frame, text="Refresh IP", command=self.refresh_ips
+            server_frame, text="Refresh IP", command=self.refresh_ips,
+            style="Secondary.TButton"
         )
         self.refresh_button.grid(row=0, column=2, padx=(0, 16))
 
@@ -72,7 +106,8 @@ class OtaSenderApp:
         self.port_entry.grid(row=0, column=4, padx=(8, 12))
 
         self.server_button = ttk.Button(
-            server_frame, text="Start Server", command=self.toggle_server
+            server_frame, text="Start Server", command=self.toggle_server,
+            style="Primary.TButton"
         )
         self.server_button.grid(row=0, column=5)
 
@@ -82,21 +117,23 @@ class OtaSenderApp:
         ttk.Label(server_frame, textvariable=self.server_status_var).grid(
             row=1, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(12, 0)
         )
-        ttk.Label(server_frame, text="SoC").grid(
+        ttk.Label(server_frame, text="Result").grid(
             row=1, column=3, sticky="w", pady=(12, 0)
         )
         ttk.Label(server_frame, textvariable=self.connection_var).grid(
             row=1, column=4, columnspan=2, sticky="w", padx=(8, 0), pady=(12, 0)
         )
 
-        file_frame = ttk.LabelFrame(root, text="APP Firmware", padding=12)
-        file_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        file_frame = ttk.LabelFrame(root, text="2. FIRMWARE IMAGE", padding=14,
+                                    style="Card.TLabelframe")
+        file_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 10))
         file_frame.columnconfigure(0, weight=1)
 
         ttk.Entry(file_frame, textvariable=self.bin_var).grid(
             row=0, column=0, sticky="ew"
         )
-        ttk.Button(file_frame, text="Browse", command=self.browse_bin).grid(
+        ttk.Button(file_frame, text="Browse BIN", command=self.browse_bin,
+                   style="Secondary.TButton").grid(
             row=0, column=1, padx=(8, 0)
         )
         self.start_button = ttk.Button(
@@ -104,11 +141,42 @@ class OtaSenderApp:
             text="Start Update",
             command=self.start_update,
             state="disabled",
+            style="Primary.TButton",
         )
         self.start_button.grid(row=0, column=2, padx=(8, 0))
 
+        device_frame = ttk.LabelFrame(root, text="3. TARGET DEVICES", padding=10,
+                                      style="Card.TLabelframe")
+        device_frame.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 10))
+        device_frame.columnconfigure(0, weight=1)
+        self.device_tree = ttk.Treeview(
+            device_frame,
+            columns=("select", "ip", "port", "status", "updated_at"),
+            show="headings", height=6, selectmode="none"
+        )
+        for column, title in (("select", "Select"), ("ip", "Device IP"),
+                              ("port", "Port"), ("status", "OTA Status"),
+                              ("updated_at", "Last Update")):
+            self.device_tree.heading(column, text=title)
+            self.device_tree.column(column, anchor="center")
+        self.device_tree.column("select", width=80, stretch=False)
+        self.device_tree.column("ip", width=260)
+        self.device_tree.column("port", width=110, stretch=False)
+        self.device_tree.column("status", width=220)
+        self.device_tree.column("updated_at", width=180, stretch=False)
+        self.device_tree.grid(row=0, column=0, sticky="ew")
+        device_scroll = ttk.Scrollbar(device_frame, orient="vertical",
+                                      command=self.device_tree.yview)
+        device_scroll.grid(row=0, column=1, sticky="ns")
+        self.device_tree.configure(yscrollcommand=device_scroll.set)
+        self.device_tree.tag_configure("connected", foreground="#2563a8")
+        self.device_tree.tag_configure("working", foreground="#b56608")
+        self.device_tree.tag_configure("success", foreground="#13764e")
+        self.device_tree.tag_configure("failed", foreground="#b42318")
+        self.device_tree.bind("<Button-1>", self.toggle_device_selection)
+
         progress_frame = ttk.Frame(root, padding=(12, 0, 12, 8))
-        progress_frame.grid(row=2, column=0, sticky="ew")
+        progress_frame.grid(row=4, column=0, sticky="ew", padx=8)
         progress_frame.columnconfigure(0, weight=1)
 
         ttk.Progressbar(
@@ -116,15 +184,16 @@ class OtaSenderApp:
             variable=self.progress_var,
             maximum=100.0,
             mode="determinate",
+            style="Status.Horizontal.TProgressbar",
         ).grid(row=0, column=0, sticky="ew")
         ttk.Label(progress_frame, textvariable=self.status_var, width=20).grid(
             row=0, column=1, padx=(8, 0)
         )
 
-        ttk.Separator(root).grid(row=3, column=0, sticky="ew", padx=12)
+        ttk.Separator(root).grid(row=5, column=0, sticky="ew", padx=20)
 
         logs = ttk.Panedwindow(root, orient="vertical")
-        logs.grid(row=4, column=0, sticky="nsew", padx=12, pady=12)
+        logs.grid(row=6, column=0, sticky="nsew", padx=20, pady=(10, 18))
 
         status_log = ttk.LabelFrame(logs, text="OTA Progress", padding=6)
         status_log.columnconfigure(0, weight=1)
@@ -178,6 +247,35 @@ class OtaSenderApp:
         if filename:
             self.bin_var.set(filename)
 
+    def toggle_device_selection(self, event):
+        if self.ota_worker and self.ota_worker.is_alive():
+            return "break"
+        if self.device_tree.identify_column(event.x) != "#1":
+            return None
+        item = self.device_tree.identify_row(event.y)
+        for info in self.clients.values():
+            if info["item"] == item:
+                info["selected"] = not info["selected"]
+                self.device_tree.set(item, "select", "☑" if info["selected"] else "☐")
+                return "break"
+        return None
+
+    def set_device_status(self, info, status):
+        if status == "Success":
+            tag = "success"
+        elif status in ("OTA Failed", "Disconnected"):
+            tag = "failed"
+        elif status in ("Updating", "Retry wait 5s", "Retrying"):
+            tag = "working"
+        else:
+            tag = "connected"
+        self.device_tree.set(info["item"], "status", status)
+        if status in ("Success", "OTA Failed"):
+            self.device_tree.set(
+                info["item"], "updated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            )
+        self.device_tree.item(info["item"], tags=(tag,))
+
     def get_server_address(self):
         host = self.host_var.get().strip()
         if not host:
@@ -212,7 +310,7 @@ class OtaSenderApp:
             server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server.bind((host, port))
-            server.listen(1)
+            server.listen()
             server.settimeout(0.5)
         except OSError as exc:
             try:
@@ -225,14 +323,12 @@ class OtaSenderApp:
         self.server_socket = server
         self.server_running = True
         self.server_status_var.set(f"Listening on {host}:{port}")
-        self.connection_var.set("Waiting for SoC")
+        self.connection_var.set("Connected devices: 0")
         self.server_button.configure(text="Stop Server")
         self.host_combo.configure(state="disabled")
         self.port_entry.configure(state="disabled")
         self.refresh_button.configure(state="disabled")
         self.log(f"LISTEN     : {host}:{port}")
-        self.log("WAIT       : waiting for SoC connection")
-
         self.accept_worker = threading.Thread(target=self.accept_loop, daemon=True)
         self.accept_worker.start()
 
@@ -244,14 +340,11 @@ class OtaSenderApp:
                 continue
             except OSError:
                 break
-
             client.settimeout(TIMEOUT_SEC)
-            self.client_socket = client
-            self.events.put(("connected", peer))
-            self.monitor_client(client)
+            self.events.put(("connected", (client, peer)))
 
     def monitor_client(self, client):
-        while self.server_running and self.client_socket is client:
+        while self.server_running and client in self.clients:
             try:
                 readable, _, exceptional = select.select([client], [], [client], 0.5)
                 if exceptional:
@@ -260,17 +353,19 @@ class OtaSenderApp:
                     break
             except (OSError, ValueError):
                 break
-
         self.events.put(("connection_lost", client))
 
     def stop_server(self):
         self.server_running = False
-        self.close_socket(self.client_socket)
-        self.client_socket = None
+        for client in list(self.clients):
+            self.close_socket(client)
+        self.clients.clear()
         self.close_socket(self.server_socket)
         self.server_socket = None
+        for item in self.device_tree.get_children():
+            self.device_tree.delete(item)
         self.server_status_var.set("Stopped")
-        self.connection_var.set("Disconnected")
+        self.connection_var.set("Connected devices: 0")
         self.server_button.configure(text="Start Server")
         self.host_combo.configure(state="normal")
         self.port_entry.configure(state="normal")
@@ -282,8 +377,9 @@ class OtaSenderApp:
     def start_update(self):
         if self.ota_worker and self.ota_worker.is_alive():
             return
-        if self.client_socket is None:
-            messagebox.showerror("SoC not connected", "Wait for the SoC connection first.")
+        selected = [client for client, info in self.clients.items() if info["selected"]]
+        if not selected:
+            messagebox.showerror("No SoC selected", "Select at least one connected SoC.")
             return
 
         bin_path = Path(self.bin_var.get().strip())
@@ -297,38 +393,42 @@ class OtaSenderApp:
         self.clear_traffic_logs()
         self.start_button.configure(state="disabled")
 
-        client = self.client_socket
         self.ota_worker = threading.Thread(
             target=self.worker_send_ota,
-            args=(client, bin_path),
+            args=(selected, bin_path),
             daemon=True,
         )
         self.ota_worker.start()
 
-    def worker_send_ota(self, client, bin_path):
-        try:
-            peer = client.getpeername()
-            self.log(f"CONNECTED  : {peer[0]}:{peer[1]}")
-            self.set_status("FWU / FWH / FWD")
-            send_ota(
-                SocketPort(
-                    client,
-                    tx_callback=self.tx_data,
-                    rx_callback=self.rx_data,
-                ),
-                bin_path,
-                progress_callback=self.progress,
-                log_callback=self.log,
-            )
-            self.set_status("Done")
-            self.progress(100.0)
-            self.events.put(("done", True))
-        except Exception as exc:
-            self.log("")
-            self.log(f"ERROR      : {exc}")
-            self.set_status("Error")
-            self.events.put(("connection_lost", client))
-            self.events.put(("done", False))
+    def worker_send_ota(self, selected, bin_path):
+        for index, client in enumerate(selected, 1):
+            info = self.clients.get(client)
+            if not info:
+                continue
+            peer = info["peer"]
+            self.events.put(("device_status", (client, "Updating")))
+            self.set_status(f"Device {index}/{len(selected)}")
+            self.progress(0.0)
+            for attempt in range(2):
+                if attempt:
+                    self.events.put(("device_status", (client, "Retry wait 5s")))
+                    self.log("RETRY      : waiting 5 seconds")
+                    time.sleep(5)
+                    self.events.put(("device_status", (client, "Retrying")))
+                try:
+                    send_ota(SocketPort(client, self.tx_data, self.rx_data), bin_path,
+                             self.progress, self.log)
+                    self.events.put(("device_status", (client, "Success")))
+                    break
+                except Exception as exc:
+                    self.log(f"ERROR      : {peer[0]}:{peer[1]} - {exc}")
+                    if attempt:
+                        self.events.put(("device_status", (client, "OTA Failed")))
+                        self.set_status("OTA Failed")
+                        self.events.put(("done", False))
+                        return
+        self.set_status("Done")
+        self.events.put(("done", True))
 
     @staticmethod
     def close_socket(sock):
@@ -407,33 +507,55 @@ class OtaSenderApp:
             elif kind == "rx_data":
                 self.append_hex_log(self.rx_log_text, value)
             elif kind == "connected":
-                self.connection_var.set(f"Connected: {value[0]}:{value[1]}")
+                client, peer = value
+                item = self.device_tree.insert(
+                    "", "end", values=("☐", peer[0], peer[1], "Connected", "-"),
+                    tags=("connected",),
+                )
+                self.clients[client] = {
+                    "peer": peer,
+                    "item": item,
+                    "selected": False,
+                }
+                self.connection_var.set(f"Connected devices: {len(self.clients)}")
                 self.start_button.configure(state="normal")
-                self.append_log(f"CONNECTED  : {value[0]}:{value[1]}")
+                self.append_log(f"CONNECTED  : {peer[0]}:{peer[1]}")
+                threading.Thread(
+                    target=self.monitor_client, args=(client,), daemon=True
+                ).start()
             elif kind == "connection_lost":
-                if self.client_socket is value:
-                    self.close_socket(self.client_socket)
-                    self.client_socket = None
+                info = self.clients.pop(value, None)
+                if info:
+                    self.close_socket(value)
+                    self.set_device_status(info, "Disconnected")
                     self.connection_var.set(
-                        "Waiting for SoC" if self.server_running else "Disconnected"
+                        f"Connected devices: {len(self.clients)}"
                     )
+                    if not self.clients:
+                        self.start_button.configure(state="disabled")
+            elif kind == "device_status":
+                client, status = value
+                info = self.clients.get(client)
+                if info:
+                    self.set_device_status(info, status)
                     self.start_button.configure(state="disabled")
             elif kind == "done":
                 if value:
                     self.start_button.configure(
-                        state="normal" if self.client_socket else "disabled"
+                        state="normal" if self.clients else "disabled"
                     )
                     messagebox.showinfo("TCP OTA Sender", "Firmware update finished.")
                 else:
                     messagebox.showerror(
-                        "TCP OTA Sender", "Firmware update failed. Check the log."
+                        "TCP OTA Sender", "OTA failed after one retry. Processing stopped."
                     )
 
         self.root.after(100, self.process_events)
 
     def on_close(self):
         self.server_running = False
-        self.close_socket(self.client_socket)
+        for client in list(self.clients):
+            self.close_socket(client)
         self.close_socket(self.server_socket)
         self.root.destroy()
 
