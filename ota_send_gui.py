@@ -12,7 +12,9 @@ from ota_send import (
     DEFAULT_PORT,
     TIMEOUT_SEC,
     SocketPort,
+    build_frame,
     get_local_ipv4_addresses,
+    read_frame,
     send_ota,
 )
 
@@ -26,6 +28,8 @@ class OtaSenderApp:
 
         self.events = queue.Queue()
         self.clients = {}
+        self.device_rows = {}
+        self.version_query_lock = threading.Lock()
         self.server_socket = None
         self.accept_worker = None
         self.ota_worker = None
@@ -111,6 +115,15 @@ class OtaSenderApp:
         )
         self.server_button.grid(row=0, column=5)
 
+        self.list_refresh_button = ttk.Button(
+            server_frame,
+            text="Refresh List",
+            command=self.refresh_device_list,
+            state="disabled",
+            style="Secondary.TButton",
+        )
+        self.list_refresh_button.grid(row=0, column=6, padx=(8, 0))
+
         ttk.Label(server_frame, text="Server").grid(
             row=1, column=0, sticky="w", pady=(12, 0)
         )
@@ -151,18 +164,20 @@ class OtaSenderApp:
         device_frame.columnconfigure(0, weight=1)
         self.device_tree = ttk.Treeview(
             device_frame,
-            columns=("select", "ip", "port", "status", "updated_at"),
+            columns=("select", "ip", "port", "version", "status", "updated_at"),
             show="headings", height=6, selectmode="none"
         )
         for column, title in (("select", "Select"), ("ip", "Device IP"),
-                              ("port", "Port"), ("status", "OTA Status"),
+                              ("port", "Port"), ("version", "Current Version"),
+                              ("status", "OTA Status"),
                               ("updated_at", "Last Update")):
             self.device_tree.heading(column, text=title)
             self.device_tree.column(column, anchor="center")
         self.device_tree.column("select", width=80, stretch=False)
-        self.device_tree.column("ip", width=260)
+        self.device_tree.column("ip", width=220)
         self.device_tree.column("port", width=110, stretch=False)
-        self.device_tree.column("status", width=220)
+        self.device_tree.column("version", width=140, stretch=False)
+        self.device_tree.column("status", width=180)
         self.device_tree.column("updated_at", width=180, stretch=False)
         self.device_tree.grid(row=0, column=0, sticky="ew")
         device_scroll = ttk.Scrollbar(device_frame, orient="vertical",
@@ -276,6 +291,33 @@ class OtaSenderApp:
             )
         self.device_tree.item(info["item"], tags=(tag,))
 
+    def update_action_buttons(self):
+        ota_running = self.ota_worker and self.ota_worker.is_alive()
+        query_running = any(info["querying"] for info in self.clients.values())
+        ready = any(info["ready"] for info in self.clients.values())
+        self.start_button.configure(
+            state="normal" if ready and not query_running and not ota_running else "disabled"
+        )
+        self.list_refresh_button.configure(
+            state="normal" if self.clients and not query_running and not ota_running else "disabled"
+        )
+
+    def refresh_device_list(self):
+        if self.ota_worker and self.ota_worker.is_alive():
+            return
+        for client, info in list(self.clients.items()):
+            if info["querying"]:
+                continue
+            info["ready"] = False
+            info["querying"] = True
+            self.set_device_status(info, "Reading version")
+            threading.Thread(
+                target=self.query_device_version,
+                args=(client, info["peer"]),
+                daemon=True,
+            ).start()
+        self.update_action_buttons()
+
     def get_server_address(self):
         host = self.host_var.get().strip()
         if not host:
@@ -355,11 +397,61 @@ class OtaSenderApp:
                 break
         self.events.put(("connection_lost", client))
 
+    def query_device_version(self, client, peer):
+        with self.version_query_lock:
+            self._query_device_version_locked(client, peer)
+
+    def _query_device_version_locked(self, client, peer):
+        version = "-"
+        last_error = None
+        original_timeout = client.gettimeout()
+        try:
+            client.settimeout(TIMEOUT_SEC)
+            for attempt in range(2):
+                time.sleep(1)
+                if attempt:
+                    self.log(f"VERSION    : {peer[0]} - retry")
+                try:
+                    port = SocketPort(client, self.tx_data, self.rx_data)
+                    port.write(build_frame("VER?"))
+                    port.flush()
+                    deadline = time.monotonic() + TIMEOUT_SEC
+                    while time.monotonic() < deadline:
+                        cmd, payload, _ = read_frame(port)
+                        if cmd == "DAT=":
+                            continue
+                        if cmd != "VER=":
+                            raise RuntimeError(
+                                f"unexpected response cmd: {cmd}, expected VER="
+                            )
+                        if len(payload) != 2:
+                            raise ValueError(
+                                f"invalid VER payload length: {len(payload)}"
+                            )
+                        version = str(int.from_bytes(payload, "little"))
+                        break
+                    if version != "-":
+                        break
+                    raise TimeoutError("timeout waiting for VER response")
+                except Exception as exc:
+                    last_error = exc
+            if version != "-":
+                self.log(f"VERSION    : {peer[0]} - {version}")
+            else:
+                self.log(f"VERSION    : {peer[0]} - unavailable ({last_error})")
+        finally:
+            try:
+                client.settimeout(original_timeout)
+            except OSError:
+                pass
+        self.events.put(("version_result", (client, version)))
+
     def stop_server(self):
         self.server_running = False
         for client in list(self.clients):
             self.close_socket(client)
         self.clients.clear()
+        self.device_rows.clear()
         self.close_socket(self.server_socket)
         self.server_socket = None
         for item in self.device_tree.get_children():
@@ -371,13 +463,17 @@ class OtaSenderApp:
         self.port_entry.configure(state="normal")
         self.refresh_button.configure(state="normal")
         self.start_button.configure(state="disabled")
+        self.list_refresh_button.configure(state="disabled")
         self.status_var.set("Ready")
         self.log("SERVER     : stopped")
 
     def start_update(self):
         if self.ota_worker and self.ota_worker.is_alive():
             return
-        selected = [client for client, info in self.clients.items() if info["selected"]]
+        selected = [
+            client for client, info in self.clients.items()
+            if info["selected"] and info["ready"]
+        ]
         if not selected:
             messagebox.showerror("No SoC selected", "Select at least one connected SoC.")
             return
@@ -392,6 +488,7 @@ class OtaSenderApp:
         self.clear_log()
         self.clear_traffic_logs()
         self.start_button.configure(state="disabled")
+        self.list_refresh_button.configure(state="disabled")
 
         self.ota_worker = threading.Thread(
             target=self.worker_send_ota,
@@ -508,31 +605,67 @@ class OtaSenderApp:
                 self.append_hex_log(self.rx_log_text, value)
             elif kind == "connected":
                 client, peer = value
-                item = self.device_tree.insert(
-                    "", "end", values=("☐", peer[0], peer[1], "Connected", "-"),
-                    tags=("connected",),
-                )
-                self.clients[client] = {
-                    "peer": peer,
-                    "item": item,
-                    "selected": False,
-                }
+                info = self.device_rows.get(peer[0])
+                if info:
+                    old_client = info.get("client")
+                    if old_client is not None and old_client is not client:
+                        self.clients.pop(old_client, None)
+                        self.close_socket(old_client)
+                    info["client"] = client
+                    info["peer"] = peer
+                    info["ready"] = False
+                    info["querying"] = True
+                    self.device_tree.set(info["item"], "port", peer[1])
+                    self.device_tree.set(info["item"], "version", "-")
+                    self.set_device_status(info, "Reading version")
+                else:
+                    item = self.device_tree.insert(
+                        "", "end",
+                        values=("☐", peer[0], peer[1], "-", "Reading version", "-"),
+                        tags=("connected",),
+                    )
+                    info = {
+                        "client": client,
+                        "peer": peer,
+                        "item": item,
+                        "selected": False,
+                        "ready": False,
+                        "querying": True,
+                    }
+                    self.device_rows[peer[0]] = info
+                self.clients[client] = info
                 self.connection_var.set(f"Connected devices: {len(self.clients)}")
-                self.start_button.configure(state="normal")
                 self.append_log(f"CONNECTED  : {peer[0]}:{peer[1]}")
                 threading.Thread(
-                    target=self.monitor_client, args=(client,), daemon=True
+                    target=self.query_device_version,
+                    args=(client, peer),
+                    daemon=True,
                 ).start()
+                self.update_action_buttons()
+            elif kind == "version_result":
+                client, version = value
+                info = self.clients.get(client)
+                if info and info["client"] is client:
+                    info["ready"] = True
+                    info["querying"] = False
+                    self.device_tree.set(info["item"], "version", version)
+                    self.set_device_status(info, "Connected")
+                    threading.Thread(
+                        target=self.monitor_client, args=(client,), daemon=True
+                    ).start()
+                    self.update_action_buttons()
             elif kind == "connection_lost":
                 info = self.clients.pop(value, None)
-                if info:
+                if info and info["client"] is value:
                     self.close_socket(value)
+                    info["client"] = None
+                    info["ready"] = False
+                    info["querying"] = False
                     self.set_device_status(info, "Disconnected")
                     self.connection_var.set(
                         f"Connected devices: {len(self.clients)}"
                     )
-                    if not self.clients:
-                        self.start_button.configure(state="disabled")
+                    self.update_action_buttons()
             elif kind == "device_status":
                 client, status = value
                 info = self.clients.get(client)
@@ -540,12 +673,12 @@ class OtaSenderApp:
                     self.set_device_status(info, status)
                     self.start_button.configure(state="disabled")
             elif kind == "done":
+                self.ota_worker = None
                 if value:
-                    self.start_button.configure(
-                        state="normal" if self.clients else "disabled"
-                    )
+                    self.update_action_buttons()
                     messagebox.showinfo("TCP OTA Sender", "Firmware update finished.")
                 else:
+                    self.update_action_buttons()
                     messagebox.showerror(
                         "TCP OTA Sender", "OTA failed after one retry. Processing stopped."
                     )
