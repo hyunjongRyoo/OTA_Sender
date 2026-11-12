@@ -1,20 +1,38 @@
-# OTA Sender v2.0.1
+# OTA Sender v2.0.2
 
-Windows PC에서 SoC의 APP 펌웨어 BIN 파일을 TCP로 전송하는 OTA 도구입니다.
+Windows PC에서 바이패스, W5500 구역제어기, W5500 열화상 카메라의 APP 펌웨어 BIN을 전송하는 OTA 도구입니다.
 
-GUI는 PC에서 TCP 서버를 열고 접속한 여러 SoC를 IP 목록으로 표시한 뒤, 선택한 기기에 기존 OTA 프로토콜로 순차 전송합니다.
+상단에서 장비에 맞는 모드를 선택하고 IP 목록에서 대상 기기를 체크해 순차 업데이트합니다.
+
+| 모드 | 연결 및 전송 방식 | BIN 크기 제한 |
+|---|---|---|
+| 바이패스 | PC TCP 서버(기본 9001), 기존 카메라 프레임 | 기존 동작 유지 |
+| W5500 구역제어기 | UDP 9300 검색, TCP 9301 raw BIN | 64 KiB |
+| W5500 열화상 카메라 | UDP 9300 검색, UDP 9303 카메라 프레임 | 192 KiB |
+
+같은 H523 MCU라도 장비의 OTA 규격이 다릅니다. 검색 응답에는 장비 종류가 없으므로 대상 IP와 모드를 확인하세요.
 
 ## Windows 배포본 다운로드
 
-[v2.0.1 릴리스](https://github.com/hyunjongRyoo/OTA_Sender/releases/tag/v2.0.1)에서
-`OTA_Sender_v2.0.1.zip`을 내려받아 압축을 풀고 `OTA_Sender.exe`를 실행합니다.
+[v2.0.2 릴리스](https://github.com/hyunjongRyoo/OTA_Sender/releases/tag/v2.0.2)에서
+`OTA_Sender_v2.0.2.zip`을 내려받아 압축을 풀고 `OTA_Sender.exe`를 실행합니다.
 배포본은 Python 설치 없이 실행할 수 있으며 ZIP에는 실행 파일과 이 README가 포함됩니다.
 업데이트할 APP 펌웨어 `.bin` 파일은 별도로 준비합니다.
 
 기존 사용자는 프로그램을 종료한 뒤 EXE를 교체합니다. 마지막 성공 일자를 유지하려면
 같은 폴더의 `update_history.json`을 보존하세요. 배포 ZIP에는 개인 장비 이력을 포함하지 않습니다.
 
-## v2.0.1 변경 내용
+## v2.0.2 변경 내용
+
+- 바이패스 / W5500 구역제어기 / W5500 열화상 카메라 페이지 구분
+- W5500 H523 열화상 카메라의 UDP 프레임 원격 펌웨어 업데이트 지원
+- 카메라 APP BIN 최대 192 KiB 지원, 구역제어기의 64 KiB 제한 유지
+- 기존 바이패스 전송, 대상 선택, 순차 처리 및 재시도 동작 유지
+- GUI·프로토콜 테스트 27개 통과 및 Windows EXE 빌드 확인
+
+실장비 OTA 전송 및 재부팅 후 설치 결과는 별도 확인이 필요합니다.
+
+## v2.0.1에서 유지한 기능
 
 - 장비 목록 확대, 체크박스 확대, 전체 선택과 부분 선택 표시
 - 열별 오름차순/내림차순 정렬 및 시작 시 화면 순서에 따른 업데이트
@@ -26,7 +44,7 @@ GUI는 PC에서 TCP 서버를 열고 접속한 여러 SoC를 IP 목록으로 표
 
 회귀 테스트 17개와 Windows EXE 빌드를 확인했습니다. 실장비 OTA 전송은 별도 현장 검증이 필요합니다.
 
-## 현재 기능
+## 바이패스 기능
 
 - 로컬 PC IPv4 주소 선택 및 새로 고침
 - TCP 서버에 접속한 SoC IP와 포트 표시
@@ -52,7 +70,7 @@ GUI는 PC에서 TCP 서버를 열고 접속한 여러 SoC를 IP 목록으로 표
 기기 OTA가 실패하면 5초 대기 후 해당 기기에 한 번 다시 전송합니다. 재시도도
 실패하면 해당 기기를 OTA 실패로 표시하고 다음 기기의 업데이트를 계속 진행합니다.
 
-## OTA 순서
+## 카메라 프레임 OTA 순서 (바이패스 / W5500 열화상 카메라)
 
 프로그램은 다음 순서로 기존 OTA 명령을 전송합니다.
 
@@ -71,7 +89,7 @@ Python 3가 설치된 Windows PC에서 다음 명령으로 GUI를 실행합니�
 python ota_send_gui.py
 ```
 
-사용 순서:
+바이패스 사용 순서 (W5500 두 모드는 아래 별도 설명 참고):
 
 1. `Local PC IP`에서 SoC가 접속할 서버 PC 주소를 선택합니다.
 2. 포트를 확인합니다. 기본값은 TCP `9001`입니다.
@@ -114,7 +132,7 @@ GUI 스크립트(또는 EXE) 옆 `update_history.json`에 IP별로 저장하고 
 재시도합니다. 여러 장비는 한 대씩 순차 조회하며, `Refresh List`를 누르면 현재
 연결된 장비에 같은 조회 절차를 다시 수행합니다.
 
-## CLI 실행
+## CLI 실행 (바이패스)
 
 ```powershell
 python ota_send.py firmware.bin --host 0.0.0.0 --port 9001
@@ -141,6 +159,8 @@ pyinstaller --clean ota_send.spec
 
 - `ota_send_gui.py`: Windows GUI 및 다중 TCP OTA 연결 관리
 - `ota_send.py`: OTA 프레임 처리와 BIN 전송 로직, CLI
+- `ota_w5500.py`: ZCU TCP 전송 및 열화상 카메라 UDP 전송, DISC 검색
+- `ota_w5500_gui.py`: 세 모드 페이지 및 W5500 대상 목록 관리
 - `ota_send_gui.spec`: GUI용 PyInstaller 빌드 설정
 - `ota_send.spec`: CLI용 PyInstaller 빌드 설정
 - `test_ota_send_gui.py`: 실제 Tk 위젯 기반 회귀 테스트 (실장비 전송 없음)
@@ -148,7 +168,7 @@ pyinstaller --clean ota_send.spec
 ## 검증
 
 ```powershell
-python -m unittest -v test_ota_send_gui
+python -m unittest -v test_ota_send_gui test_ota_w5500 test_w5500_pages test_camera_ota
 ```
 
 숫자 정렬, 전체/부분 선택, 화면 순서의 실행, 실패 시 재시도 후 다음 장비 계속 처리, 미완료 선택,
@@ -157,6 +177,31 @@ python -m unittest -v test_ota_send_gui
 ## 현재 버전 범위
 
 - 다중 기기 목록, 대상 선택 및 선택 기기 순차 업데이트 지원
-- PC TCP 서버 기본 포트는 9001 사용
+- 바이패스 PC TCP 서버 기본 포트는 9001 사용
 - 실패 시 5초 대기 후 1회 재시도, 재시도 실패 시 다음 장비 계속 처리
 - OTA 명령, 패킷 형식, CRC32 및 청크 크기는 현재 현장용 구현을 유지
+
+## W5500 ZCU 직접 OTA 페이지
+
+상단 W5500 구역제어기 버튼으로 전환합니다. Local PC IP 선택 → SCAN → 대상 체크 → Browse BIN → Start Update 순서입니다.
+UDP 9300 DISC와 IP/fw JSON 응답, TCP 9301 FWU! → READ → size/CRC32 8바이트 LE → raw BIN → SUCC/FAIL을 사용합니다. ZCU 전송 도구의 최대 BIN 64 KiB 제한을 적용합니다. 카메라용 프레임은 사용하지 않습니다.
+기존 선택·정렬·집계·성공 일시·1회 재시도 UI를 재사용합니다. W5500 로그는 기본 접힘이며 단계·경과 시간·IP·시도 번호·토큰·전송 바이트를 기록합니다. 실제 장비 FAIL과 접속/응답 시간 초과를 구분합니다.
+SUCC는 다운로드/CRC/플래그 저장 성공입니다. BOOT 설치 성공이나 목표 버전 일치 판정은 아닙니다. 재부팅 후 SCAN 또는 Refresh List로 실제 버전을 다시 조회합니다.
+현재 ZCU 코드는 OTA 접속 PC IP 192.168.0.246 또는 192.168.0.231만 허용합니다. SCAN 응답과 OTA IP 허용은 별도입니다.
+검증: python -m unittest -v test_ota_send_gui test_ota_w5500
+
+## W5500 열화상 카메라 OTA 페이지
+
+상단 모드는 바이패스 / W5500 구역제어기 / W5500 열화상 카메라로 구분합니다.
+바이패스는 기존 TCP 서버 방식, 구역제어기는 기존 ZCU 직접 전송 방식을 유지합니다.
+카메라는 Local PC IP 선택 → SCAN → 대상 체크 → Browse BIN → Start Update 순서입니다.
+
+현재 H523의 `th_cam_udp.c`, `th_cam_cmd.c`, `th_cam_ota.c`, `flash_layout.h` 기준:
+- 검색: UDP 9300 DISC, IP/fw JSON 응답. 검색 응답에는 장비 종류가 없으므로 대상 IP를 확인하고 모드를 선택합니다.
+- 전송: UDP 9303, 기존 카메라 STX/LEN/CH/CMD/DATA/XOR/ETX 프레임.
+- FWU! → FWU=READ, FWH!(size/CRC32 각각 32비트 LE) → FWH=READ.
+- FWD!마다 FWD=READ를 기다리고 마지막 FWD=SUCC를 확인합니다. 기존 244바이트 청크를 사용합니다.
+- APP BIN 허용 크기: 1..196608바이트(192 KiB). ZCU의 64 KiB 제한은 변경하지 않습니다.
+- 재부팅 후 SCAN으로 실제 버전을 다시 확인합니다. 실제 장비 설치 성공은 별도 확인이 필요합니다.
+
+검증: `python -m unittest -v test_ota_send_gui test_ota_w5500 test_w5500_pages test_camera_ota`

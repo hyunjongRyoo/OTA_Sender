@@ -21,8 +21,9 @@ from ota_send import (
 )
 
 class OtaSenderApp:
-    def __init__(self, root):
+    def __init__(self, root, parent=None):
         self.root = root
+        self.ui_parent = parent if parent is not None else root
         self.root.title("OTA Firmware Update Manager")
         self.root.geometry("1080x820")
         self.root.minsize(920, 720)
@@ -84,7 +85,7 @@ class OtaSenderApp:
                         background="#1d9b67")
 
     def build_ui(self, addresses):
-        root = self.root
+        root = self.ui_parent
         root.columnconfigure(0, weight=1)
         root.rowconfigure(3, weight=1)
 
@@ -901,7 +902,8 @@ class OtaSenderApp:
 
 def main():
     root = tk.Tk()
-    OtaSenderApp(root)
+    from ota_w5500_gui import build_pages
+    build_pages(root)
     root.mainloop()
 
 
